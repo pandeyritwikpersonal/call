@@ -1,0 +1,269 @@
+package com.synechron.msci.parsing.pdfutil;
+
+import java.io.BufferedWriter;
+
+/*
+ * Licensed to the Apache Software Foundation (ASF) under one or more
+ * contributor license agreements.  See the NOTICE file distributed with
+ * this work for additional information regarding copyright ownership.
+ * The ASF licenses this file to You under the Apache License, Version 2.0
+ * (the "License"); you may not use this file except in compliance with
+ * the License.  You may obtain a copy of the License at
+ *
+ *      http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+import java.io.ByteArrayOutputStream;
+import java.io.File;
+import java.io.FileWriter;
+import java.io.IOException;
+import java.io.OutputStreamWriter;
+import java.io.PrintWriter;
+import java.io.StringReader;
+import java.io.Writer;
+import java.util.ArrayList;
+import java.util.List;
+import java.util.Map;
+import java.util.Set;
+
+import org.apache.pdfbox.pdmodel.PDDocument;
+import org.apache.pdfbox.text.PDFTextStripper;
+import org.apache.pdfbox.text.TextPosition;
+
+import com.synechron.msci.App;
+import com.synechron.msci.parsing.data.AuditFeesTable;
+import com.synechron.msci.parsing.data.Line;
+import com.synechron.msci.parsing.data.Message;
+import com.synechron.msci.parsing.data.TokenHolder;
+import com.synechron.msci.parsing.data.TokenTypeEnum;
+import com.synechron.msci.parsing.lex.Lexer;
+import com.synechron.msci.parsing.lex.PdfLexer;
+import com.synechron.msci.parsing.resource.AuditorsResource;
+import com.synechron.msci.parsing.resource.KeyWordsResource;
+import com.synechron.msci.parsing.utils.TokenUtils;
+
+public class ProcessPdf extends PDFTextStripper {
+
+	public static StringBuilder finalStr = new StringBuilder();
+	public Message message = new Message();
+	int lastSeenNumber;
+	int adder = 1000;
+	int pageNumber = 1;
+	
+	int lastPageNumber = -1;
+	
+	int tableOfContentPageNumber = -1;
+	public static String textFromPDFfile;
+	public static String preProcessedTextPdfFile;
+	
+	public static boolean isDebugEnabled;
+	
+	public List<TokenHolder> stringBuffer;
+
+	
+	public ProcessPdf() throws IOException {
+
+	}
+
+	public Message getMessage() {
+		return message;
+	}
+
+
+	public Message preProcess(File file) throws IOException {
+
+		PDDocument document = null;
+
+		try {
+
+			document = PDDocument.load(file);
+			this.setSortByPosition(true);
+			this.setStartPage(0);
+			this.setEndPage(document.getNumberOfPages());
+
+			Writer dummy = new OutputStreamWriter(new ByteArrayOutputStream());
+			this.writeText(document, dummy);
+		} catch(Exception e){
+			
+			e.printStackTrace();
+		}finally {
+			if (document != null) {
+				document.close();
+			}
+		}
+
+
+		if(App.debugGeneratedText){
+			debugInfo();
+		}
+		
+
+		return message;
+
+	}
+	
+	public void debugInfo(){
+		
+		
+		try{
+		File textFromPdf = new File(textFromPDFfile);
+
+		// if file doesnt exists, then create it
+		if (!textFromPdf.exists()) {
+			textFromPdf.createNewFile();
+		}
+		FileWriter fw = new FileWriter(textFromPdf.getAbsoluteFile());
+		BufferedWriter bw = new BufferedWriter(fw);
+		bw.write(finalStr.toString());
+
+		bw.close();
+
+
+		File preProcessText = new File(preProcessedTextPdfFile);
+
+		if (!preProcessText.exists()) {
+			preProcessText.createNewFile();
+		}
+
+		PrintWriter p = new PrintWriter(preProcessText);
+
+		Set<Integer> keys = message.getLineMap().keySet();
+
+		for (Integer key : keys) {
+
+			Line line = message.getLineMap().get(key);
+			p.println(line.getLineNumber() + ": " + line.getLineText().toString());
+			
+			String tokens = " ";
+			
+			for(TokenHolder tok : line.getTokens()){
+				
+				tokens = tokens + "token: " + "ScannedText - " + tok.getScannedText() + "type - " + tok.getTokenType().toString();  
+			}
+			p.println(tokens);
+
+		}
+		p.close();
+		
+		}catch(Exception e){
+			e.printStackTrace();
+		}
+	}
+
+
+	public String getYear(Line firstLine, TokenHolder token) {
+
+		for (TokenHolder tok : firstLine.getTokens()) {
+
+			if (tok.getTokenType() == TokenTypeEnum.YEAR) {
+				if (TokenUtils.overLap(tok, token)) {
+					return tok.getScannedText();
+				}
+			}
+		}
+
+		return null;
+	}
+	
+	public String getOverLapping(Line firstLine, TokenHolder token) {
+
+		for (TokenHolder tok : firstLine.getTokens()) {
+
+			if (tok.getTokenType() == TokenTypeEnum.YEAR) {
+				if (TokenUtils.overLap(tok, token)) {
+					return tok.getScannedText();
+				}
+			}
+		}
+
+		return null;
+	}
+
+	/**
+	 * Override the default functionality of PDFTextStripper.
+	 */
+	@Override
+	protected void writeString(String string, List<TextPosition> textPositions) throws IOException {
+
+		int lineNumber = -1;
+
+		if (textPositions != null && textPositions.size() > 0) {
+			
+			lineNumber = (int) textPositions.get(0).getYDirAdj();
+
+		
+			
+			int thisPage = getCurrentPageNo();
+			
+			if(lastPageNumber == -1){
+				lastPageNumber = thisPage;
+			}
+			
+			if(thisPage != lastPageNumber){
+				
+				adder = 1000 * thisPage;
+				lastPageNumber = thisPage;
+			}
+			
+			lineNumber = lineNumber + adder;
+			
+			Map<Integer, Line> lineMap = message.getLineMap();
+
+			Line line = lineMap.get(lineNumber);
+
+			if (line != null) {
+				line.addTextToLine(string);
+
+			} else {
+
+				line = new Line();
+				line.setPageNumber(thisPage);
+				line.setLineNumber(lineNumber);
+				
+				this.stringBuffer = new ArrayList<TokenHolder>();
+				Line lastLine = message.getLastLine();
+
+				if (lastLine != null) {
+					lastLine.setNextLine(line);
+					line.setPrevLine(lastLine);
+					message.setLastLine(line);
+
+				} else {
+					message.setFirstLine(line);
+					message.setLastLine(line);
+
+				}
+
+				line.getLineText().append(string);
+				lineMap.put(lineNumber, line);
+			}
+
+			String text = string;
+			
+			Lexer lexer = new Lexer(new StringReader(text), new PdfLexer(this.stringBuffer), message, line, (int) textPositions.get(0).getXDirAdj());
+			
+			while (true) {
+
+				try {
+					String str = lexer.yylex();
+
+					if (str == null)
+						break;
+
+				} catch (IOException e) {
+					// TODO Auto-generated catch block
+					e.printStackTrace();
+				}
+			}
+
+		}
+
+	}
+
+}
